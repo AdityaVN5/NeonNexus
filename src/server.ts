@@ -8,6 +8,7 @@ if (process.env.NEW_RELIC_LICENSE_KEY) {
     console.warn('NEW_RELIC_LICENSE_KEY not set. Skipping New Relic initialization.');
 }
 import express, { Request, Response } from 'express';
+import cors from 'cors';
 import dotenv from 'dotenv';
 import pool from './db';
 
@@ -17,6 +18,7 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+app.use(cors());
 app.use(express.json());
 
 // POST /api/leaderboard/submit

@@ -40,49 +40,43 @@ const App: React.FC = () => {
   const [players, setPlayers] = useState<Player[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // Initialize Data
+  // Fetch Data from Backend
   useEffect(() => {
-    // Simulate initial data fetch
-    const timer = setTimeout(() => {
-      const data = generateMockData(100);
-      setPlayers(data);
-      setLoading(false);
-    }, 1200);
+    const fetchLeaderboard = async () => {
+      try {
+        const response = await fetch('http://localhost:3000/api/leaderboard/top');
+        if (!response.ok) throw new Error('Failed to fetch leaderboard');
+        
+        const data = await response.json();
+        
+        // Map backend data to Player interface
+        const mappedPlayers: Player[] = data.map((item: any, index: number) => ({
+          id: item.user_id.toString(),
+          username: item.username || `User_${item.user_id}`,
+          rank: index + 1,
+          score: parseInt(item.total_score),
+          avatar: MOCK_AVATARS[index % MOCK_AVATARS.length],
+          trend: 'stable', // Backend doesn't provide trend yet
+          change: 0
+        }));
 
-    return () => clearTimeout(timer);
+        setPlayers(mappedPlayers);
+      } catch (error) {
+        console.error('Error fetching leaderboard:', error);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchLeaderboard();
+    
+    // Refresh every 10 seconds
+    const interval = setInterval(fetchLeaderboard, 10000);
+    return () => clearInterval(interval);
   }, []);
 
-  // Simulate Live Updates (optional visual flair)
-  useEffect(() => {
-    if (loading) return;
-
-    const interval = setInterval(() => {
-      setPlayers(currentPlayers => {
-        // Randomly pick a player from top 20 to update score slightly
-        const newPlayers = [...currentPlayers];
-        const randomIndex = Math.floor(Math.random() * 20);
-        if (newPlayers[randomIndex]) {
-           const scoreChange = Math.floor(Math.random() * 100) - 20;
-           newPlayers[randomIndex] = {
-             ...newPlayers[randomIndex],
-             score: newPlayers[randomIndex].score + scoreChange,
-             trend: scoreChange > 0 ? 'up' : 'down',
-             change: Math.abs(1) // Simplified for demo
-           };
-           // Re-sort
-           newPlayers.sort((a, b) => b.score - a.score);
-           // Re-assign ranks
-           return newPlayers.map((p, idx) => ({ ...p, rank: idx + 1 }));
-        }
-        return newPlayers;
-      });
-    }, 3000);
-
-    return () => clearInterval(interval);
-  }, [loading]);
-
   const topThree = players.slice(0, 3);
-  const restOfLeaderboard = players.slice(3, 20); // Show up to rank 20 for scrolling
+  const restOfLeaderboard = players.slice(3, 10); // Show top 10 as per API limit
 
   const handleUserSearch = (id: string) => {
     return players.find(p => p.id.toLowerCase() === id.toLowerCase() || p.username.toLowerCase().includes(id.toLowerCase()));
