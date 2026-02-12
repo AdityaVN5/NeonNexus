@@ -1,6 +1,8 @@
+require('newrelic');
 import express, { Request, Response } from 'express';
 import dotenv from 'dotenv';
 import pool from './db';
+import redisClient from './redisClient';
 
 dotenv.config();
 
@@ -28,27 +30,52 @@ app.post('/api/leaderboard/submit', async (req: Request, res: Response) => {
       [userId, score]
     );
 
-    // 2. Update leaderboard
-    // We strive for robustness. If the user doesn't exist in leaderboard, insert them.
-    // If they do, update the score.
-    // However, the requirement says "aggregate scores".
-    // A simple approach is: check if user exists in leaderboard.
-    // If yes, update total_score = total_score + new_score
-    // If no, insert total_score = new_score.
-    // Efficient UPSERT:
-    await client.query(`
-      INSERT INTO leaderboard (user_id, total_score)
-      VALUES ($1, $2)
-      ON CONFLICT (user_id)
-      DO UPDATE SET 
-        total_score = leaderboard.total_score + EXCLUDED.total_score,
-        last_updated = CURRENT_TIMESTAMP
-    `, [userId, score]);
+    // 2. Pessimistic Locking: SELECT ... FOR UPDATE
+    // This locks the row for this user in the leaderboard table.
+    // Use ON CONFLICT DO NOTHING to ensure we have a row to lock if it exists,
+    // or we insert a new one.
+    // However, standard pattern for "updating existing or inserting new" with locking:
+    // We can try to lock. If no row, we insert. If row, we update.
+    // But UPSERT (ON CONFLICT) is atomic in Postgres. 
+    // The requirement asks to usage of "SELECT ... FOR UPDATE" inside transaction.
+    // Doing strict "SELECT ... FOR UPDATE" ensures we serialize updates for THIS user.
+    // This prevents race conditions where two concurrent requests for same user might
+    // read the same old score and write overwriting each other (lost update problem).
+    
+    // Check if user exists and lock the row
+    const checkRes = await client.query(
+        'SELECT total_score FROM leaderboard WHERE user_id = $1 FOR UPDATE',
+        [userId]
+    );
+
+    if (checkRes.rows.length > 0) {
+        // User exists, update score
+        await client.query(
+            'UPDATE leaderboard SET total_score = total_score + $2, last_updated = CURRENT_TIMESTAMP WHERE user_id = $1',
+            [userId, score]
+        );
+    } else {
+        // User does not exist, insert. 
+        // Note: A race condition is still possible here if two threads both get 0 rows and try to insert.
+        // `ON CONFLICT` handles unicity constraint, but let's stick to the flow.
+        await client.query(`
+            INSERT INTO leaderboard (user_id, total_score)
+            VALUES ($1, $2)
+            ON CONFLICT (user_id) DO UPDATE SET 
+            total_score = leaderboard.total_score + EXCLUDED.total_score,
+            last_updated = CURRENT_TIMESTAMP
+        `, [userId, score]);
+    }
 
     await client.query('COMMIT');
+    
+    // Invalidate Redis Cache for Top 10
+    // Because this user's new score might push them into Top 10.
+    await redisClient.del('leaderboard:top');
+
     res.status(200).json({ message: 'Score submitted successfully' });
 
-  } catch (err) {
+  } catch (err: any) {
     await client.query('ROLLBACK');
     console.error('Error submitting score:', err);
     res.status(500).json({ error: 'Internal Server Error' });
@@ -60,6 +87,15 @@ app.post('/api/leaderboard/submit', async (req: Request, res: Response) => {
 // GET /api/leaderboard/top
 app.get('/api/leaderboard/top', async (req: Request, res: Response) => {
   try {
+    // 1. Check Redis Cache
+    const cacheKey = 'leaderboard:top';
+    const cachedData = await redisClient.get(cacheKey);
+
+    if (cachedData) {
+        return res.json(JSON.parse(cachedData));
+    }
+
+    // 2. If Miss, Query DB
     const result = await pool.query(`
       SELECT l.user_id, u.username, l.total_score
       FROM leaderboard l
@@ -67,8 +103,12 @@ app.get('/api/leaderboard/top', async (req: Request, res: Response) => {
       ORDER BY l.total_score DESC
       LIMIT 10
     `);
+
+    // 3. Set Cache (Ex: 10 seconds)
+    await redisClient.setEx(cacheKey, 10, JSON.stringify(result.rows));
+
     res.json(result.rows);
-  } catch (err) {
+  } catch (err: any) {
     console.error('Error fetching top leaderboard:', err);
     res.status(500).json({ error: 'Internal Server Error' });
   }
@@ -83,12 +123,6 @@ app.get('/api/leaderboard/rank/:userId', async (req: Request, res: Response) => 
   }
 
   try {
-    // To get the rank, we count how many players have a higher score.
-    // Or simpler: Use a window function in a subquery or a direct count.
-    // For a single user, COUNT(*) WHERE total_score > (SELECT total_score FROM leaderboard WHERE user_id = ?) is efficient enough for this scale if indexed properly.
-    // But let's use the window function approach if we were getting multiple, but for one, direct count is faster than computing all ranks.
-    
-    // First, check if user exists in leaderboard
     const userRes = await pool.query('SELECT total_score FROM leaderboard WHERE user_id = $1', [userId]);
     
     if (userRes.rows.length === 0) {
@@ -97,13 +131,12 @@ app.get('/api/leaderboard/rank/:userId', async (req: Request, res: Response) => 
     
     const userScore = userRes.rows[0].total_score;
 
-    // Count users with higher score
     const rankRes = await pool.query('SELECT COUNT(*) + 1 as rank FROM leaderboard WHERE total_score > $1', [userScore]);
     const rank = parseInt(rankRes.rows[0].rank);
 
     res.json({ userId, rank, totalScore: userScore });
 
-  } catch (err) {
+  } catch (err: any) {
     console.error('Error fetching user rank:', err);
     res.status(500).json({ error: 'Internal Server Error' });
   }
