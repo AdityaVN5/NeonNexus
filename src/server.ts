@@ -1,8 +1,16 @@
-require('newrelic');
+if (process.env.NEW_RELIC_LICENSE_KEY) {
+  try {
+    require('newrelic');
+  } catch (err) {
+    console.warn('New Relic could not be loaded:', err);
+  }
+} else {
+    console.warn('NEW_RELIC_LICENSE_KEY not set. Skipping New Relic initialization.');
+}
 import express, { Request, Response } from 'express';
 import dotenv from 'dotenv';
 import pool from './db';
-import redisClient from './redisClient';
+
 
 dotenv.config();
 
@@ -69,9 +77,8 @@ app.post('/api/leaderboard/submit', async (req: Request, res: Response) => {
 
     await client.query('COMMIT');
     
-    // Invalidate Redis Cache for Top 10
-    // Because this user's new score might push them into Top 10.
-    await redisClient.del('leaderboard:top');
+    // Redis cache invalidation removed
+
 
     res.status(200).json({ message: 'Score submitted successfully' });
 
@@ -87,15 +94,7 @@ app.post('/api/leaderboard/submit', async (req: Request, res: Response) => {
 // GET /api/leaderboard/top
 app.get('/api/leaderboard/top', async (req: Request, res: Response) => {
   try {
-    // 1. Check Redis Cache
-    const cacheKey = 'leaderboard:top';
-    const cachedData = await redisClient.get(cacheKey);
-
-    if (cachedData) {
-        return res.json(JSON.parse(cachedData));
-    }
-
-    // 2. If Miss, Query DB
+    // 2. Query DB
     const result = await pool.query(`
       SELECT l.user_id, u.username, l.total_score
       FROM leaderboard l
@@ -103,9 +102,6 @@ app.get('/api/leaderboard/top', async (req: Request, res: Response) => {
       ORDER BY l.total_score DESC
       LIMIT 10
     `);
-
-    // 3. Set Cache (Ex: 10 seconds)
-    await redisClient.setEx(cacheKey, 10, JSON.stringify(result.rows));
 
     res.json(result.rows);
   } catch (err: any) {

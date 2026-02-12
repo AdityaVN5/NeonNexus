@@ -3,11 +3,20 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-require('newrelic');
+if (process.env.NEW_RELIC_LICENSE_KEY) {
+    try {
+        require('newrelic');
+    }
+    catch (err) {
+        console.warn('New Relic could not be loaded:', err);
+    }
+}
+else {
+    console.warn('NEW_RELIC_LICENSE_KEY not set. Skipping New Relic initialization.');
+}
 const express_1 = __importDefault(require("express"));
 const dotenv_1 = __importDefault(require("dotenv"));
 const db_1 = __importDefault(require("./db"));
-const redisClient_1 = __importDefault(require("./redisClient"));
 dotenv_1.default.config();
 const app = (0, express_1.default)();
 const PORT = process.env.PORT || 3000;
@@ -53,9 +62,7 @@ app.post('/api/leaderboard/submit', async (req, res) => {
         `, [userId, score]);
         }
         await client.query('COMMIT');
-        // Invalidate Redis Cache for Top 10
-        // Because this user's new score might push them into Top 10.
-        await redisClient_1.default.del('leaderboard:top');
+        // Redis cache invalidation removed
         res.status(200).json({ message: 'Score submitted successfully' });
     }
     catch (err) {
@@ -70,13 +77,7 @@ app.post('/api/leaderboard/submit', async (req, res) => {
 // GET /api/leaderboard/top
 app.get('/api/leaderboard/top', async (req, res) => {
     try {
-        // 1. Check Redis Cache
-        const cacheKey = 'leaderboard:top';
-        const cachedData = await redisClient_1.default.get(cacheKey);
-        if (cachedData) {
-            return res.json(JSON.parse(cachedData));
-        }
-        // 2. If Miss, Query DB
+        // 2. Query DB
         const result = await db_1.default.query(`
       SELECT l.user_id, u.username, l.total_score
       FROM leaderboard l
@@ -84,8 +85,6 @@ app.get('/api/leaderboard/top', async (req, res) => {
       ORDER BY l.total_score DESC
       LIMIT 10
     `);
-        // 3. Set Cache (Ex: 10 seconds)
-        await redisClient_1.default.setEx(cacheKey, 10, JSON.stringify(result.rows));
         res.json(result.rows);
     }
     catch (err) {
