@@ -1,3 +1,6 @@
+import dotenv from 'dotenv';
+dotenv.config();
+
 if (process.env.NEW_RELIC_LICENSE_KEY) {
   try {
     require('newrelic');
@@ -9,11 +12,7 @@ if (process.env.NEW_RELIC_LICENSE_KEY) {
 }
 import express, { Request, Response } from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
 import pool from './db';
-
-
-dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
