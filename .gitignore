@@ -1,3 +1,4 @@
 node_modules
 .env
 walkthrough.md
+newrelic.ini
