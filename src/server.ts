@@ -13,6 +13,7 @@ if (process.env.NEW_RELIC_LICENSE_KEY) {
 import express, { Request, Response } from 'express';
 import cors from 'cors';
 import pool from './db';
+import redisClient from './redisClient';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -78,7 +79,12 @@ app.post('/api/leaderboard/submit', async (req: Request, res: Response) => {
 
     await client.query('COMMIT');
     
-    // Redis cache invalidation removed
+    // Redis cache invalidation
+    try {
+        await redisClient.del('leaderboard:top');
+    } catch (redisErr) {
+        console.error('Failed to invalidate cache:', redisErr);
+    }
 
 
     res.status(200).json({ message: 'Score submitted successfully' });
@@ -95,6 +101,16 @@ app.post('/api/leaderboard/submit', async (req: Request, res: Response) => {
 // GET /api/leaderboard/top
 app.get('/api/leaderboard/top', async (req: Request, res: Response) => {
   try {
+    // 1. Try to get from Cache
+    try {
+        const cached = await redisClient.get('leaderboard:top');
+        if (cached) {
+            return res.json(JSON.parse(cached));
+        }
+    } catch (redisErr) {
+        console.error('Redis cache error:', redisErr);
+    }
+
     // 2. Query DB
     const result = await pool.query(`
       SELECT l.user_id, u.username, l.total_score
@@ -103,6 +119,15 @@ app.get('/api/leaderboard/top', async (req: Request, res: Response) => {
       ORDER BY l.total_score DESC
       LIMIT 10
     `);
+
+    // 3. Set Cache
+    try {
+        await redisClient.set('leaderboard:top', JSON.stringify(result.rows), {
+            EX: 60 // 60 seconds
+        });
+    } catch (redisErr) {
+        console.error('Failed to update cache:', redisErr);
+    }
 
     res.json(result.rows);
   } catch (err: any) {
